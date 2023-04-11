@@ -1,10 +1,111 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// ©jdehorty
+
 // @version=5
-strategy('Machine Learning: Lorentzian Classification', 'Lorentzian Classification', precision=4, overlay=true, margin_long=100, margin_short=100, max_bars_back = 5000)
+strategy('Machine Learning: Lorentzian Classification', 'Lorentzian Classification', precision=4, overlay=true)
 symbol = syminfo.tickerid
 
 
 import jdehorty/MLExtensions/2 as ml
 import jdehorty/KernelFunctions/2 as kernels
+
+// ====================
+// ==== Background ====
+// ====================
+
+// When using Machine Learning algorithms like K-Nearest Neighbors, choosing an
+// appropriate distance metric is essential. Euclidean Distance is often used as
+// the default distance metric, but it may not always be the best choice. This is
+// because market data is often significantly impacted by proximity to significant
+// world events such as FOMC Meetings and Black Swan events. These major economic
+// events can contribute to a warping effect analogous a massive object's 
+// gravitational warping of Space-Time. In financial markets, this warping effect 
+// operates on a continuum, which can analogously be referred to as "Price-Time".
+
+// To help to better account for this warping effect, Lorentzian Distance can be
+// used as an alternative distance metric to Euclidean Distance. The geometry of
+// Lorentzian Space can be difficult to visualize at first, and one of the best
+// ways to intuitively understand it is through an example involving 2 feature
+// dimensions (z=2). For purposes of this example, let's assume these two features
+// are Relative Strength Index (RSI) and the Average Directional Index (ADX). In
+// reality, the optimal number of features is in the range of 3-8, but for the sake
+// of simplicity, we will use only 2 features in this example.
+
+// Fundamental Assumptions:
+// (1) We can calculate RSI and ADX for a given chart.
+// (2) For simplicity, values for RSI and ADX are assumed to adhere to a Gaussian 
+//     distribution in the range of 0 to 100.
+// (3) The most recent RSI and ADX value can be considered the origin of a coordinate 
+//     system with ADX on the x-axis and RSI on the y-axis.
+
+// Distances in Euclidean Space:
+// Measuring the Euclidean Distances of historical values with the most recent point
+// at the origin will yield a distribution that resembles Figure 1 (below).
+
+//                        [RSI]
+//                          |                      
+//                          |                   
+//                          |                 
+//                      ...:::....              
+//                .:.:::••••••:::•::..             
+//              .:•:.:•••::::••::••....::.            
+//             ....:••••:••••••••::••:...:•.          
+//            ...:.::::::•••:::•••:•••::.:•..          
+//            ::•:.:•:•••••••:.:•::::::...:..         
+//  |--------.:•••..•••••••:••:...:::•:•:..:..----------[ADX]    
+//  0        :•:....:•••••::.:::•••::••:.....            
+//           ::....:.:••••••••:•••::••::..:.          
+//            .:...:••:::••••••••::•••....:          
+//              ::....:.....:•::•••:::::..             
+//                ..:..::••..::::..:•:..              
+//                    .::..:::.....:                
+//                          |            
+//                          |                   
+//                          |
+//                          |
+//                         _|_ 0        
+//                          
+//        Figure 1: Neighborhood in Euclidean Space
+
+// Distances in Lorentzian Space:
+// However, the same set of historical values measured using Lorentzian Distance will 
+// yield a different distribution that resembles Figure 2 (below).
+
+//                         
+//                         [RSI] 
+//  ::..                     |                    ..:::  
+//   .....                   |                  ......
+//    .••••::.               |               :••••••. 
+//     .:•••••:.             |            :::••••••.  
+//       .•••••:...          |         .::.••••••.    
+//         .::•••••::..      |       :..••••••..      
+//            .:•••••••::.........::••••••:..         
+//              ..::::••••.•••••••.•••••••:.            
+//                ...:•••••••.•••••••••::.              
+//                  .:..••.••••••.••••..                
+//  |---------------.:•••••••••••••••••.---------------[ADX]          
+//  0             .:•:•••.••••••.•••••••.                
+//              .••••••••••••••••••••••••:.            
+//            .:••••••••••::..::.::••••••••:.          
+//          .::••••••::.     |       .::•••:::.       
+//         .:••••••..        |          :••••••••.     
+//       .:••••:...          |           ..•••••••:.   
+//     ..:••::..             |              :.•••••••.   
+//    .:•....                |               ...::.:••.  
+//   ...:..                  |                   :...:••.     
+//  :::.                     |                       ..::  
+//                          _|_ 0
+//
+//       Figure 2: Neighborhood in Lorentzian Space 
+
+
+// Observations:
+// (1) In Lorentzian Space, the shortest distance between two points is not 
+//     necessarily a straight line, but rather, a geodesic curve.
+// (2) The warping effect of Lorentzian distance reduces the overall influence  
+//     of outliers and noise.
+// (3) Lorentzian Distance becomes increasingly different from Euclidean Distance 
+//     as the number of nearest neighbors used for comparison increases.
 
 // ======================
 // ==== Custom Types ====
@@ -237,6 +338,45 @@ array.push(y_train_array, y_train_series)
 // ====  Core ML Logic  ====
 // =========================
 
+// Approximate Nearest Neighbors Search with Lorentzian Distance:
+// A novel variation of the Nearest Neighbors (NN) search algorithm that ensures a chronologically uniform distribution of neighbors.
+
+// In a traditional KNN-based approach, we would iterate through the entire dataset and calculate the distance between the current bar 
+// and every other bar in the dataset and then sort the distances in ascending order. We would then take the first k bars and use their 
+// labels to determine the label of the current bar. 
+
+// There are several problems with this traditional KNN approach in the context of real-time calculations involving time series data:
+// - It is computationally expensive to iterate through the entire dataset and calculate the distance between every historical bar and
+//   the current bar.
+// - Market time series data is often non-stationary, meaning that the statistical properties of the data change slightly over time.
+// - It is possible that the nearest neighbors are not the most informative ones, and the KNN algorithm may return poor results if the
+//   nearest neighbors are not representative of the majority of the data.
+
+// Previously, the user @capissimo attempted to address some of these issues in several of his PineScript-based KNN implementations by:
+// - Using a modified KNN algorithm based on consecutive furthest neighbors to find a set of approximate "nearest" neighbors.
+// - Using a sliding window approach to only calculate the distance between the current bar and the most recent n bars in the dataset.
+
+// Of these two approaches, the latter is inherently limited by the fact that it only considers the most recent bars in the overall dataset. 
+
+// The former approach has more potential to leverage historical price action, but is limited by:
+// - The possibility of a sudden "max" value throwing off the estimation
+// - The possibility of selecting a set of approximate neighbors that are not representative of the majority of the data by oversampling 
+//   values that are not chronologically distinct enough from one another
+// - The possibility of selecting too many "far" neighbors, which may result in a poor estimation of price action
+
+// To address these issues, a novel Approximate Nearest Neighbors (ANN) algorithm is used in this indicator.
+
+// In the below ANN algorithm:
+// 1. The algorithm iterates through the dataset in chronological order, using the modulo operator to only perform calculations every 4 bars.
+//    This serves the dual purpose of reducing the computational overhead of the algorithm and ensuring a minimum chronological spacing 
+//    between the neighbors of at least 4 bars.
+// 2. A list of the k-similar neighbors is simultaneously maintained in both a predictions array and corresponding distances array.
+// 3. When the size of the predictions array exceeds the desired number of nearest neighbors specified in settings.neighborsCount, 
+//    the algorithm removes the first neighbor from the predictions array and the corresponding distance array.
+// 4. The lastDistance variable is overriden to be a distance in the lower 25% of the array. This step helps to boost overall accuracy 
+//    by ensuring subsequent newly added distance values increase at a slower rate.
+// 5. Lorentzian distance is used as a distance metric in order to minimize the effect of outliers and take into account the warping of 
+//    "price-time" due to proximity to significant economic events.
 
 lastDistance = -1.0
 size = math.min(settings.maxBarsBack-1, array.size(y_train_array)-1)
@@ -321,23 +461,29 @@ isBearish = useKernelFilter ? (useKernelSmoothing ? isBearishSmooth : isBearishR
 // ===========================
 // ==== Entries and Exits ====
 // ===========================
-    
-    
-// Input for trailing take-profit percentage
+
+// PARAMETERS
 // Assumes quote currency is FIAT as with BTC/USDT pair
-tp1=input.float(200, title="Take Profit 1")
-tp2=input.float(500, title="Take Profit 2")
-sl=input.float(200, title="Stop Loss")
+tp1 = input.float(0.2, title="Take Profit 1", minval=0.01, maxval=1)
+tp2 = input.float(0.5, title="Take Profit 2", minval=0.01, maxval=1)
+sl = input.float(0.2, title="Stop Loss", minval=0.01, maxval=1)
 
 
-// Entry Conditions: Booleans for ML Model Position Entries
-startLongTrade = isNewBuySignal and isBullish and isEmaUptrend and isSmaUptrend
-startShortTrade = isNewSellSignal and isBearish // and isEmaDowntrend and isSmaDowntrend
-if startLongTrade
-    strategy.entry("Buy", strategy.long)
-if startShortTrade
-    strategy.entry("Sell", strategy.short)
-    
+equityInLong() =>
+    float equityLong = na
+    if strategy.position_size > 0
+        equityLong := strategy.position_size * strategy.position_avg_price
+    equityLong
+
+equityInShort() =>
+    float equityShort = na
+    if strategy.position_size < 0
+        equityShort := strategy.position_size * strategy.position_avg_price * -1
+    equityShort
+
+equityValueLong = equityInLong()
+equityValueShort = equityInShort()
+
 // ORDERS
 // Active Orders
 // Check if strategy has open positions
@@ -346,41 +492,106 @@ inShort = strategy.position_size < 0
 // Check if strategy reduced position size in last bar
 longClose = strategy.position_size < strategy.position_size[1]
 shortClose = strategy.position_size > strategy.position_size[1]
-    
+
 // Exit Conditions
-// Calculate Take Profit 
-longTP1 = strategy.position_avg_price + tp1
-longTP2 = strategy.position_avg_price + tp2
-shortTP1 = strategy.position_avg_price - tp1
-shortTP2 = strategy.position_avg_price - tp2
-    
+// Calculate Take Profit
+longTP1 = strategy.position_avg_price * (1 + tp1)
+longTP2 = strategy.position_avg_price * (1 + tp2)
+shortTP1 = strategy.position_avg_price * (1 - tp1)
+shortTP2 = strategy.position_avg_price * (1 - tp2)
+
+
 // Calculate Stop Loss
 // Initialise variables
-var float longSL = 0.0
-var float shortSL = 0.0
+var float longSL = 0.00
+var float shortSL = 0.00
 
-// When not in position, set stop loss using close price which is the price used during backtesting
-// When in a position, check to see if the position was reduced on the last bar
-// If it was, set stop loss to position entry price. Otherwise, maintain last stop loss value
-longSL := if inLong and ta.barssince(longClose) < ta.barssince(startLongTrade)
-    strategy.position_avg_price
+// Exit Conditions
+// Calculate Stop Loss
+longSL := if inLong and ta.barssince(longClose) < ta.barssince(longCondition)
+    strategy.position_avg_price * (1 - sl)
 else if inLong
     longSL[1]
-else
-    close - sl
-
-shortSL := if inShort and ta.barssince(shortClose) < ta.barssince(startShortTrade)
-    strategy.position_avg_price
+    
+shortSL := if inShort and ta.barssince(shortClose) < ta.barssince(shortCondition)
+    strategy.position_avg_price * (1 + sl)
 else if inShort
     shortSL[1]
-else
-    close + sl
-
+    
 // Manage positions
-if inLong
+// Entry Conditions: Booleans for ML Model Position Entries
+
+startLongTrade = isNewBuySignal and isBullish and isEmaUptrend and isSmaUptrend
+startShortTrade = isNewSellSignal and isBearish // and isEmaDowntrend and isSmaDowntrend
+
+if startLongTrade
+    strategy.entry("Buy", strategy.long)
     strategy.exit("TP1/SL", from_entry="Long", qty_percent=50, limit=longTP1, stop=longSL)
     strategy.exit("TP2/SL", from_entry="Long", limit=longTP2, stop=longSL)
 
-if inShort
+if startShortTrade
+    strategy.entry("Sell", strategy.short)
     strategy.exit("TP1/SL", from_entry="Short", qty_percent=50, limit=shortTP1, stop=shortSL)
-    strategy.exit("TP2/SL", from_entry="Short", limit=shortTP2, stop=shortSL)  
+    strategy.exit("TP2/SL", from_entry="Short", limit=shortTP2, stop=shortSL)    
+
+// Dynamic Exit Conditions: Booleans for ML Model Position Exits based on Fractal Filters and Kernel Regression Filters
+lastSignalWasBullish = ta.barssince(startLongTrade) < ta.barssince(startShortTrade)
+lastSignalWasBearish = ta.barssince(startShortTrade) < ta.barssince(startLongTrade)
+barsSinceRedEntry = ta.barssince(startShortTrade)
+barsSinceRedExit = ta.barssince(alertBullish)
+barsSinceGreenEntry = ta.barssince(startLongTrade)
+barsSinceGreenExit = ta.barssince(alertBearish)
+isValidShortExit = barsSinceRedExit > barsSinceRedEntry
+isValidLongExit = barsSinceGreenExit > barsSinceGreenEntry
+endLongTradeDynamic = (isBearishChange and isValidLongExit[1])
+endShortTradeDynamic = (isBullishChange and isValidShortExit[1])
+
+// Fixed Exit Conditions: Booleans for ML Model Position Exits based on a Bar-Count Filters
+endLongTradeStrict = ((isHeldFourBars and isLastSignalBuy) or (isHeldLessThanFourBars and isNewSellSignal and isLastSignalBuy)) and startLongTrade[4]
+endShortTradeStrict = ((isHeldFourBars and isLastSignalSell) or (isHeldLessThanFourBars and isNewBuySignal and isLastSignalSell)) and startShortTrade[4]
+isDynamicExitValid = not useEmaFilter and not useSmaFilter and not useKernelSmoothing
+endLongTrade = settings.useDynamicExits and isDynamicExitValid ? endLongTradeDynamic : endLongTradeStrict 
+endShortTrade = settings.useDynamicExits and isDynamicExitValid ? endShortTradeDynamic : endShortTradeStrict
+
+// =========================
+// ==== Plotting Labels ====
+// =========================
+
+// Note: These will not repaint once the most recent bar has fully closed. By default, signals appear over the last closed bar; to override this behavior set offset=0.
+plotshape(startLongTrade ? low : na, 'Buy', shape.labelup, location.belowbar, color=ml.color_green(prediction), size=size.small, offset=0)
+plotshape(startShortTrade ? high : na, 'Sell', shape.labeldown, location.abovebar, ml.color_red(-prediction), size=size.small, offset=0)
+plotshape(endLongTrade and settings.showExits ? high : na, 'StopBuy', shape.xcross, location.absolute, color=#3AFF17, size=size.tiny, offset=0)
+plotshape(endShortTrade and settings.showExits ? low : na, 'StopSell', shape.xcross, location.absolute, color=#FD1707, size=size.tiny, offset=0)
+
+// ================
+// ==== Alerts ====
+// ================ 
+
+// Separate Alerts for Entries and Exits
+alertcondition(startLongTrade, title='Open Long ▲', message='LDC Open Long ▲ | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(endLongTrade, title='Close Long ▲', message='LDC Close Long ▲ | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(startShortTrade, title='Open Short ▼', message='LDC Open Short  | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(endShortTrade, title='Close Short ▼', message='LDC Close Short ▼ | {{ticker}}@{{close}} | ({{interval}})')
+
+// Combined Alerts for Entries and Exits
+alertcondition(startShortTrade or startLongTrade, title='Open Position ▲▼', message='LDC Open Position ▲▼ | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(endShortTrade or endLongTrade, title='Close Position ▲▼', message='LDC Close Position  ▲▼ | {{ticker}}@[{{close}}] | ({{interval}})')
+
+// Kernel Estimate Alerts
+alertcondition(condition=alertBullish, title='Kernel Bullish Color Change', message='LDC Kernel Bullish ▲ | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(condition=alertBearish, title='Kernel Bearish Color Change', message='LDC Kernel Bearish ▼ | {{ticker}}@{{close}} | ({{interval}})')
+
+// =========================
+// ==== Display Signals ==== 
+// =========================
+
+atrSpaced = useAtrOffset ? ta.atr(1) : na
+compressionFactor = settings.neighborsCount / settings.colorCompression
+c_pred = prediction > 0 ? color.from_gradient(prediction, 0, compressionFactor, #787b86, #009988) : prediction <= 0 ? color.from_gradient(prediction, -compressionFactor, 0, #CC3311, #787b86) : na
+c_label = showBarPredictions ? c_pred : na
+c_bars = showBarColors ? color.new(c_pred, 50) : na
+x_val = bar_index
+y_val = useAtrOffset ? prediction > 0 ? high + atrSpaced: low - atrSpaced : prediction > 0 ? high + hl2*barPredictionsOffset/20 : low - hl2*barPredictionsOffset/30
+label.new(x_val, y_val, str.tostring(prediction), xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_up, c_label, size.normal, text.align_left)
+barcolor(showBarColors ? color.new(c_pred, 50) : na)
+
